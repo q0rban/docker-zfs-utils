@@ -1,0 +1,85 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+version: 3
+
+dotenv:
+  - .env.local
+  - .local.env
+  - .env
+
+env:
+  NAMESPACE: tugboat
+  IMAGE_NAME: zfs-utils
+  # Separate each platform with a comma.
+  PLATFORMS: linux/amd64,linux/arm64
+  # Separate each tag with a comma.
+  TAGS: latest,bookworm-slim
+  FROM_TAG: bookworm-slim
+
+vars:
+  BUILDX_BUILDER:
+    sh: echo "{{.NAMESPACE}}-{{.IMAGE_NAME}}"
+  IMAGE_TAGS:
+    sh: echo "{{.TAGS}}" | sed -E 's@(^|,)([^,]+)@ --tag {{.NAMESPACE}}/{{.IMAGE_NAME}}:\2@g'
+
+tasks:
+  default:
+    desc: 'Builds the image. Set PUSH=1 to push after building.'
+    cmds:
+      - task: create-builder
+      - task: build
+
+  create-builder:
+    desc: '[subtask] Create the Docker buildx builder.'
+    status:
+      # Exits zero (up to date) if there is already a builder.
+      - docker buildx ls | grep -q '^{{.BUILDX_BUILDER}}\s'
+    cmds:
+      - docker buildx create
+          --name "{{.BUILDX_BUILDER}}"
+          --platform "{{.PLATFORMS}}"
+          --bootstrap
+          --use
+
+  build:
+    desc: '[subtask] Build any docker image tarballs generated from bake for Tugboat usage.'
+    vars:
+      PUSH_OPT:
+        sh: (test "$PUSH" != "true" && test "$PUSH" != "1") || echo "--push"
+    cmds:
+      - docker buildx use "{{.BUILDX_BUILDER}}"
+      - echo 'PUSH_OPT {{.PUSH_OPT}}'
+      - docker buildx build
+          --build-arg FROM_TAG={{.FROM_TAG}}
+          --platform "{{.PLATFORMS}}"
+          {{.IMAGE_TAGS}} {{.PUSH_OPT}} .
+
+  clean:
+    desc: 'Removes all generated files and docker images.'
+    prompt: This will remove any generated files and delete all docker images in
+      the {{.NAMESPACE}}/* namespace. Do you want to continue?
+    deps:
+      - rm-images
+
+  clean-all:
+    desc: 'Removes the buildkit builder, all generated files, and all docker images.'
+    deps:
+      - rm-builder
+      - rm-images
+    prompt: This will remove the buildkit builder, all generated files, and
+      delete all docker images in the {{.NAMESPACE}}/* namespace. Do you
+      want to continue?
+
+  rm-builder:
+    internal: true
+    status:
+      - if docker buildx ls | grep -q '^{{.BUILDX_BUILDER}}\s'; then exit 1; fi
+    cmd: docker buildx rm -f '{{.BUILDX_BUILDER}}'
+  rm-images:
+    internal: true
+    status:
+      - test -z "{{.IMAGES}}"
+    vars:
+      IMAGES:
+        sh: docker images ls --filter=reference="{{.NAMESPACE}}/{{.IMAGE_NAME}}" -q | sort | uniq
+    cmd: docker rmi --force $(echo "{{.IMAGES}}") || true
+
